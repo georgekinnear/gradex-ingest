@@ -404,12 +404,12 @@ func main() {
 	
 	// TODO - remove timestamp from filename, and have it as a column in the csv. Make this just append details to csv file if it exists
 	report_time := time.Now().Format("2006-01-02-15-04-05")
-	parselearn.WriteSubmissionsToCSV(submissions, fmt.Sprintf("%s/%s-learn-success.csv", outputDir, report_time))
-	parselearn.WriteSubmissionsToCSV(bad_submissions, fmt.Sprintf("%s/%s-learn-errors.csv", outputDir, report_time))
-	parselearn.WriteSubmissionsToCSV(no_submissions, fmt.Sprintf("%s/%s-learn-nosubmission.csv", outputDir, report_time))
+	parselearn.WriteSubmissionsToCSV(submissions, fmt.Sprintf("%s/../logs/%s-learn-success.csv", outputDir, report_time))
+	parselearn.WriteSubmissionsToCSV(bad_submissions, fmt.Sprintf("%s/../logs/%s-learn-errors.csv", outputDir, report_time))
+	parselearn.WriteSubmissionsToCSV(no_submissions, fmt.Sprintf("%s/../logs/%s-learn-nosubmission.csv", outputDir, report_time))
 
 	// Write submission summary to csv
-	file, err := os.OpenFile(fmt.Sprintf("%s/%s-learn-submissionsummary.csv", outputDir, report_time), os.O_RDWR|os.O_CREATE, os.ModePerm)
+	file, err := os.OpenFile(fmt.Sprintf("%s/../logs/%s-learn-submissionsummary.csv", outputDir, report_time), os.O_RDWR|os.O_CREATE, os.ModePerm)
 	check(err)
 	defer file.Close()
 	err = gocsv.MarshalFile(&submission_summaries, file)
