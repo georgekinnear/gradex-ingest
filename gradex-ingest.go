@@ -5,7 +5,7 @@
 //
 //  gradex-ingest -deadline=2020-04-22-16-00 -classlist=MATH00000_enrolment.csv learndir=MATH00000 outputdir=MATH00000_examno
 //
-//  * classlist is a csv that should have columns: UUN, Exam Number, First Name, Last Name, Minutes of Extra Time Allowed
+//  * classlist is a csv that should have columns: UUN, Exam Number, Extra Time (giving the number of minutes allowed)
 //  * deadline is used to determine which submissions are late (also taking account of allowance for extra time from classlist)
 //  * learndir should be the path to the folder containing the unzipped export from Learn
 //  * outputdir should be the path where the anonymised scripts will be placed
@@ -26,15 +26,31 @@ import (
 	"strings"
 	"time"
 	"flag"
-	"encoding/csv"
-	"log"
 	"io"
 	"regexp"
-	"strconv"
 
-	"github.com/timdrysdale/parselearn"
+	"github.com/gocarina/gocsv"
+	"github.com/georgekinnear/parselearn"
 )
 
+// Structure for the class list csv
+type Students struct {
+	StudentID       string  `csv:"UUN"`
+	ExamNumber      string  `csv:"Exam Number"`
+	ExtraTime      	int     `csv:"Extra Time"`
+}
+
+/*
+type SubmissionSummary struct {
+	UUN			       string  `csv:"UUN"`
+	ExamNumber         string  `csv:"ExamNumber"`
+	DateSubmitted      string  `csv:"DateSubmitted"`
+	LateSubmission     string  `csv:"LateSubmission"`
+	ExtraTime	       int     `csv:"ExtraTime"`
+	Filename           string  `csv:"Filename"`
+	NumberOfFiles      int     `csv:"NumberOfFiles"`
+}
+*/
 
 func main() {
 
@@ -43,8 +59,8 @@ func main() {
     var courseCode string
     flag.StringVar(&courseCode, "course", "MATH00000", "the course code, will be prepended to output file names")
 	
-	var classList string
-    flag.StringVar(&classList, "classlist", "MATH00000_enrolment.csv", "csv file containing the student UUN, Exam Number and number of minutes of extra time they are entitled to")
+	var classListCSV string
+    flag.StringVar(&classListCSV, "classlist", "MATH00000_enrolment.csv", "csv file containing the student UUN, Exam Number and number of minutes of extra time they are entitled to")
 	
 	var learnDir string
     flag.StringVar(&learnDir, "learndir", "learn_dir", "path of the folder containing the unzipped Learn download")
@@ -60,11 +76,13 @@ func main() {
 	deadline_time, e := time.Parse("2006-01-02-15-04", deadline)
 	check(e)
 	
+	// Add 59 seconds to the deadline, so that a deadline of 12:00 means submissions up to 12:00:59 are on time but 12:01:00 is late
+	deadline_time = deadline_time.Add(time.Second * time.Duration(59))
+	
 	fmt.Println("course: ", courseCode)
-	fmt.Println("deadline: ", deadline_time.Format("2006-01-02 at 15:04"))	
-	fmt.Println("class list csv: ", classList)
+	fmt.Println("deadline: ", deadline_time.Format("2006-01-02 at 15:04:05"))	
 	fmt.Println("learn folder: ", learnDir)
-	fmt.Println("folders to read: ", flag.Args())
+	fmt.Println("other folders to read: ", flag.Args())
 	
 	// Check the output directory exists, and if not then make it
 	err := ensureDir(outputDir)
@@ -77,70 +95,236 @@ func main() {
 		os.Exit(1)
 	}
 	
-	// Read the contents of the Learn folder
+	// Check that the input folder exists
 	err = ensureDir(learnDir)
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-		
+	
+	// Parse the class list
+	fmt.Println("class list csv: ", classListCSV)
+	classListFile, err := os.OpenFile(classListCSV, os.O_RDWR|os.O_CREATE, os.ModePerm)
+	if err != nil {
+		fmt.Println("File: ",classListFile, err)
+		panic(err)
+	}
+	defer classListFile.Close()
+
+	classlist_raw := []Students{}
+	if err := gocsv.UnmarshalFile(classListFile, &classlist_raw); err != nil {
+		panic(err)
+	}
+	// Make this into a map with UUNs as keys
+	classlist := map[string]Students{}
+	for _, s := range classlist_raw {
+		classlist[s.StudentID] = s
+		s.StudentID = strings.ToUpper(s.StudentID)
+		if !strings.HasPrefix(s.StudentID, "S") {
+			// prepend an "S" to the UUN if not there already in the classlist csv
+			s.StudentID = "S"+s.StudentID
+		}
+	}
+	
+	fmt.Println("class list contains ", len(classlist), "students")
+	
+	
 	// regex to read the UUN that appears in the Learn files
 	finduun, _ := regexp.Compile("_(s[0-9]{7})_attempt_")
-	
-	// Build map of UUN to filename, for each .txt receipt file in the learnDir
-	var learn_files = map[string]string{}
+
+
+	// Build map of UUN to a slice of Learn submissions
+	var learn_files = map[string][]parselearn.Submission{}
+	var num_learn_files int
 	filepath.Walk(learnDir, func(path string, f os.FileInfo, _ error) error {
 		if !f.IsDir() {
 			r, err := regexp.MatchString(".txt", f.Name())
 			if err == nil && r {
 				//fmt.Println(f.Name())
-				extracted_uun := finduun.FindStringSubmatch(f.Name())[1]
-				learn_files[strings.ToUpper(extracted_uun)] = f.Name()
+				extracted_uun := strings.ToUpper(finduun.FindStringSubmatch(f.Name())[1])
+				
+				// read the Learn receipt file
+				submission, err := parselearn.ParseLearnReceipt(learnDir+"/"+f.Name())
+				check(err)
+				submission.ExamNumber = classlist[extracted_uun].ExamNumber
+				submission.ExtraTime = classlist[extracted_uun].ExtraTime
+				submission.ReceiptFilename = f.Name()
+				
+				// Decide if the submission is LATE or not
+				sub_time, _ := time.Parse("2006-01-02-15-04-05", submission.DateSubmitted)
+				if(sub_time.After(deadline_time)) {
+					if(submission.ExtraTime > 0) {
+						// For students with extra time noted in the class list, their submission deadline is shifted
+						if(sub_time.After(deadline_time.Add(time.Minute * time.Duration(submission.ExtraTime)))) {
+							submission.LateSubmission = "LATE"
+						}
+					} else {
+						// For students with no allowance of extra time, their submission is marked late
+						submission.LateSubmission = "LATE"
+					}
+				}
+				
+				// If there are already submissions from this student, add them to the list; otherwise start a new list
+				if _, ok := learn_files[extracted_uun]; ok {
+					learn_files[extracted_uun] = append(learn_files[extracted_uun], submission)					
+				} else {
+					learn_files[extracted_uun] = []parselearn.Submission{submission}
+				}
+				num_learn_files++
 			}
-		}
+			}
 		return nil
 	})
-	fmt.Println("learn files: ",len(learn_files))
-	
-	
+	fmt.Println("learn files: ",num_learn_files, "from", len(learn_files), "students")
+		
+/*	
 	// Read the class list csv	
-	csvfile, err := os.Open(classList)
+	csvfile, err := os.Open(classListCSV)
 	if err != nil {
 		log.Fatalln("Couldn't open the csv file", err)
 	}
 	classlistcsv := csv.NewReader(csvfile)
 	
-	// Prepare data structures to hold the data
 	var examno = map[string]string{}
+*/
+
+	// Prepare data structures to hold the data
 	var submissions []parselearn.Submission
 	var bad_submissions []parselearn.Submission
+	var no_submissions []parselearn.Submission
+	var submission_summaries []parselearn.Submission
 
-	// Process each student in the class list csv
-	for {
-		// Error catching
-		record, err := classlistcsv.Read()
-		if err == io.EOF {
-			break
+	//
+	// Identify the submission for each student in the class list
+	//
+	for _, student := range classlist {
+		
+		student_uun := student.StudentID
+		if !strings.HasPrefix(student_uun, "S") {
+			// prepend an "S" to the UUN if not there already in the classlist csv
+			student_uun = "S"+student_uun
 		}
-		if err != nil {
-			log.Fatal(err)
+		student_examno := student.ExamNumber
+		extratime := student.ExtraTime
+		
+		// Check their submissions to Learn
+		if student_submissions, ok := learn_files[student_uun]; ok {
+			fmt.Printf("%s -> %s (extra time: %d)\n", student_uun, student_examno, extratime)
+			
+			// Find the last non-LATE submission among student_submissions
+			submission := parselearn.Submission{}
+			submission.DateSubmitted = "2000-01-01-12-00-00" // a dummy time well in the past
+			submission_time, _ := time.Parse("2006-01-02-15-04-05", submission.DateSubmitted)
+			submission.LateSubmission = "LATE" // this will appear in the report if there are no on-time submissions
+			for _, sub := range student_submissions {
+				if sub.LateSubmission == "LATE" {
+					// skip any LATE submissions
+					fmt.Println(" -- Skipped LATE submission: ", sub.ReceiptFilename)
+					sub.ToMark = "No - LATE"
+					submission_summaries = append(submission_summaries, sub)
+					removeFile(learnDir+"/"+sub.ReceiptFilename)
+					removeFile(learnDir+"/"+sub.Filename)
+					continue
+				}
+				sub_time, _ := time.Parse("2006-01-02-15-04-05", sub.DateSubmitted)
+				if sub_time.After(submission_time) {
+					// submission is superseded by sub - so remove files for submission
+					if submission.ReceiptFilename != "" {
+						fmt.Println(" -- Skipped submission: ", submission.ReceiptFilename)
+						submission.ToMark = "No - Superseded"						
+						submission_summaries = append(submission_summaries, submission)
+						removeFile(learnDir+"/"+submission.ReceiptFilename)
+						removeFile(learnDir+"/"+submission.Filename)
+					}
+					// update submission with the more recent sub
+					submission = sub
+					submission_time = sub_time
+				}				
+			}
+			
+			// If a student's earliest submission is LATE, note that fact
+			if submission.LateSubmission == "LATE" {
+				fmt.Println(" --- No on-time submission.")
+				bad_submissions = append(bad_submissions, student_submissions[0])
+				continue
+			}
+			
+			if submission.NumberOfFiles == 1 && submission.FiletypeError == "" {
+			
+				// We have one PDF for the student, so move it into place in the outputDir
+				
+				fmt.Println(" -- Using Submission:   ",submission.Filename)
+				submission.ToMark = "Yes"
+				submission_summaries = append(submission_summaries, submission)
+				new_path := outputDir+"/"+student_examno+".pdf"
+				if (submission.LateSubmission == "LATE") {
+					new_path = outputDir+"/LATE-"+student_examno+".pdf"
+				}
+				filemovestatus := moveFile(learnDir+"/"+submission.Filename, new_path)
+				submission.OutputFile = filemovestatus
+				fmt.Println(" --- ", filemovestatus)
+				
+				// If the file move was OK, we can remove the Learn receipt as it's no longer needed
+				if(strings.Contains(filemovestatus, "File")) {
+					removeFile(learnDir+"/"+submission.ReceiptFilename)
+				}
+				
+				// Add this record to the table of successes
+				submissions = append(submissions, submission)
+				
+			} else {
+				// There was a problem with this submission, so it will need investigation and manual work
+				
+				fmt.Println(" --- Bad submission: ",submission.NumberOfFiles, " files ", submission.FiletypeError)
+				submission.ToMark = "Bad submission"
+				submission_summaries = append(submission_summaries, submission)
+				bad_submissions = append(bad_submissions, submission)					
+			}
+			
+			// Done - move on to next student
+			continue
 		}
 		
-		// todo - this relies on the columns being in a certain order - redo using gocarina/gocsv
-		student_uun := record[0]
-		// TODO - prepend an "S" to the UUN if not there already
-		student_examno := record[1]
-		extratime := record[4]
-		extratime_int, _ :=  strconv.Atoi(extratime)
-		fmt.Printf("%s -> %s (extra time: %s)\n", student_uun, student_examno, extratime)
-		examno[student_uun] = student_examno
+		// At this point they did not submit to Learn - check for a raw UUN.pdf
+		raw_uun_path := learnDir+"/"+strings.ToLower(student_uun)+".pdf"
+		if _, err := os.Stat(raw_uun_path); err == nil {
+			// Such a file exists, so create a dummy Submission for it and then move the PDF into place
+			manual_sub := parselearn.Submission{}
+			manual_sub.UUN = student_uun
+			manual_sub.ExamNumber = student_examno
+			filemovestatus := moveFile(raw_uun_path, outputDir+"/"+student_examno+".pdf")
+			manual_sub.OutputFile = filemovestatus
+			manual_sub.LateSubmission = "Manual"
+			submissions = append(submissions, manual_sub)
+			
+			// Done - move on to next student
+			continue
+		}
+		
+		// Now there is really no submission from this student, so record that fact
+		sub := parselearn.Submission{}
+		sub.UUN = student_uun
+		sub.ExamNumber = student_examno
+		sub.NumberOfFiles = 0
+		no_submissions = append(no_submissions, sub)
+	
+	}
+	
+	
+	
+	
+	/*
+	
+	
+	
+	
 		
 		// check the Learn folder
 		if learn_file, ok := learn_files[student_uun]; ok {
 			fmt.Println(" - Learn file: ",learn_file)
 
 			// read the Learn receipt file
-			submission, err := parselearn.ParseLearnReceipt(learnDir+"/"+learn_file)
+			submission, err := parselearn.ParseLearnReceipt(learnDir+"/"+learn_file[0])
 			submission.ExamNumber = student_examno
 			submission.ExtraTime = extratime_int
 			
@@ -174,7 +358,7 @@ func main() {
 					
 					// If the file move was OK, we can remove the Learn receipt as it's no longer needed
 					if(strings.Contains(filemovestatus, "File")) {
-						removeFile(learnDir+"/"+learn_file)
+						removeFile(learnDir+"/"+learn_file[0])
 					}
 					
 					// Add this record to the table of successes
@@ -212,14 +396,24 @@ func main() {
 		
 	}
 	
+	*/
+	
 	fmt.Println("\n\nSuccessful submissions: ", len(submissions))
 	fmt.Println("\n\nBad submissions: ", len(bad_submissions))
+	fmt.Println("\n\nNo submissions: ", len(no_submissions))
 	
 	// TODO - remove timestamp from filename, and have it as a column in the csv. Make this just append details to csv file if it exists
 	report_time := time.Now().Format("2006-01-02-15-04-05")
 	parselearn.WriteSubmissionsToCSV(submissions, fmt.Sprintf("%s/%s-learn-success.csv", outputDir, report_time))
 	parselearn.WriteSubmissionsToCSV(bad_submissions, fmt.Sprintf("%s/%s-learn-errors.csv", outputDir, report_time))
+	parselearn.WriteSubmissionsToCSV(no_submissions, fmt.Sprintf("%s/%s-learn-nosubmission.csv", outputDir, report_time))
 
+	// Write submission summary to csv
+	file, err := os.OpenFile(fmt.Sprintf("%s/%s-learn-submissionsummary.csv", outputDir, report_time), os.O_RDWR|os.O_CREATE, os.ModePerm)
+	check(err)
+	defer file.Close()
+	err = gocsv.MarshalFile(&submission_summaries, file)
+	check(err)
 	
 	// That's enough
 	os.Exit(0)
@@ -241,7 +435,7 @@ func moveFile(path_from string, path_to string) string {
     if file_to, err := os.Stat(path_to); err == nil {
 		file_to_exists = true
 		time_to := file_to.ModTime()
-		if(time_to.After(time_from)) {
+		if(!time_from.Before(time_to)) {
 			// No need to copy over, but delete the path_from file since it is not needed
 			removeFile(path_from)
 			return "File already exists"
@@ -339,5 +533,12 @@ func copyFileContents(src, dst string) (err error) {
         return
     }
     err = out.Sync()
+	
+	// Update the "last modified" time on the newly created file
+	currenttime := time.Now().Local()
+	err = os.Chtimes(dst, currenttime, currenttime)
+	if err != nil {
+		fmt.Println(err)
+	}
     return
 }
