@@ -6,7 +6,7 @@ import (
 	"os"
 	"strings"
 
-	pdf "github.com/unidoc/unipdf/v3/model"
+	pdf "github.com/unidoc/unipdf/model"
 )
 
 // pr-pal @ https://stackoverflow.com/questions/37932551/mkdir-if-not-exists-using-golang
