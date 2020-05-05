@@ -28,6 +28,7 @@ import (
 	"flag"
 	"io"
 	"regexp"
+	"encoding/json"
 
 	"github.com/gocarina/gocsv"
 	"github.com/georgekinnear/parselearn"
@@ -70,6 +71,8 @@ func main() {
 	
 	var deadline string
     flag.StringVar(&deadline, "deadline", "2020-04-22-16-00", "date and time of the normal submission deadline")
+	
+	debuggingMode := flag.Bool("debug", false, "print extra details for debugging? (true/false)")
 	
 	flag.Parse()
 
@@ -118,15 +121,18 @@ func main() {
 	// Make this into a map with UUNs as keys
 	classlist := map[string]Students{}
 	for _, s := range classlist_raw {
-		classlist[s.StudentID] = s
 		s.StudentID = strings.ToUpper(s.StudentID)
 		if !strings.HasPrefix(s.StudentID, "S") {
 			// prepend an "S" to the UUN if not there already in the classlist csv
 			s.StudentID = "S"+s.StudentID
 		}
+		classlist[s.StudentID] = s
 	}
 	
 	fmt.Println("class list contains ", len(classlist), "students")
+	if *debuggingMode {
+		PrettyPrintStruct(classlist)
+	}
 	
 	
 	// regex to read the UUN that appears in the Learn files
@@ -176,6 +182,9 @@ func main() {
 		return nil
 	})
 	fmt.Println("learn files: ",num_learn_files, "from", len(learn_files), "students")
+	if *debuggingMode {
+		PrettyPrintStruct(learn_files)
+	}
 		
 /*	
 	// Read the class list csv	
@@ -545,4 +554,15 @@ func copyFileContents(src, dst string) (err error) {
 		fmt.Println(err)
 	}
     return
+}
+
+func PrettyPrintStruct(layout interface{}) error {
+
+	json, err := json.MarshalIndent(layout, "", "\t")
+	if err != nil {
+		return err
+	}
+
+	fmt.Println(string(json))
+	return nil
 }
