@@ -223,7 +223,7 @@ func main() {
 					sub.ToMark = "No - LATE"
 					submission_summaries = append(submission_summaries, sub)
 					removeFile(learnDir+"/"+sub.ReceiptFilename)
-					if submission.Filename != "" {
+					if sub.Filename != "" {
 						removeFile(learnDir+"/"+sub.Filename)
 					}
 					continue
