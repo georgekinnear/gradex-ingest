@@ -223,7 +223,9 @@ func main() {
 					sub.ToMark = "No - LATE"
 					submission_summaries = append(submission_summaries, sub)
 					removeFile(learnDir+"/"+sub.ReceiptFilename)
-					removeFile(learnDir+"/"+sub.Filename)
+					if submission.Filename != "" {
+						removeFile(learnDir+"/"+sub.Filename)
+					}
 					continue
 				}
 				sub_time, _ := time.Parse("2006-01-02-15-04-05", sub.DateSubmitted)
@@ -234,7 +236,9 @@ func main() {
 						submission.ToMark = "No - Superseded"						
 						submission_summaries = append(submission_summaries, submission)
 						removeFile(learnDir+"/"+submission.ReceiptFilename)
-						removeFile(learnDir+"/"+submission.Filename)
+						if submission.Filename != "" {
+							removeFile(learnDir+"/"+submission.Filename)
+						}
 					}
 					// update submission with the more recent sub
 					submission = sub
